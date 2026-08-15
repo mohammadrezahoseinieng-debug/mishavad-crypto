@@ -2,4 +2,3 @@ flask
 gunicorn
 yfinance
 pandas
-pandas-ta
