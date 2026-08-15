@@ -10,8 +10,10 @@ app = Flask(__name__)
 ASSETS = {
     "BTC-USD": "بیت‌کوین (BTC/USDT)",
     "ETH-USD": "اتریوم (ETH/USDT)",
-    "GC=F": "انس طلا جهانی (Gold)",
     "SOL-USD": "سولانا (SOL/USDT)",
+    "GC=F": "انس طلا جهانی (Gold)",
+    "SI=F": "نقره جهانی (Silver)",
+    "CL=F": "نفت خام وست تگزاس (Crude Oil)",
     "EURUSD=X": "یورو / دلار (EUR/USD)"
 }
 
@@ -22,7 +24,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>دستیار جامع معاملاتی و هوش بازار | mishavad</title>
-    <meta http-equiv="refresh" content="30">
+    <meta http-equiv="refresh" content="25">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { 
@@ -65,7 +67,7 @@ HTML_TEMPLATE = """
         .sell { background-color: rgba(239, 68, 68, 0.16); color: #f87171; border: 1.5px solid #ef4444; }
         .hold { background-color: rgba(156, 163, 175, 0.14); color: #d1d5db; border: 1.5px solid #4b5563; }
 
-        /* باکس احتمالات و وین‌ریت */
+        /* نوار احتمال برد و شکست */
         .prob-container {
             background: #0f172a; border-radius: 12px; padding: 14px; margin-bottom: 14px; border: 1px solid #1e293b;
         }
@@ -158,11 +160,11 @@ HTML_TEMPLATE = """
                         <span class="val-entry">${{ "{:,.2f}".format(data.scalp.entry) if data.scalp.entry > 10 else "{:,.4f}".format(data.scalp.entry) }}</span>
                     </div>
                     <div class="trade-row border">
-                        <span style="color: #94a3b8;">تارگت اول (TP 1):</span>
+                        <span style="color: #94a3b8;">تارگت اول خروج (TP 1):</span>
                         <span class="val-tp">${{ "{:,.2f}".format(data.scalp.tp1) if data.scalp.tp1 > 10 else "{:,.4f}".format(data.scalp.tp1) }}</span>
                     </div>
                     <div class="trade-row border">
-                        <span style="color: #94a3b8;">تارگت دوم (TP 2):</span>
+                        <span style="color: #94a3b8;">تارگت دوم خروج (TP 2):</span>
                         <span class="val-tp">${{ "{:,.2f}".format(data.scalp.tp2) if data.scalp.tp2 > 10 else "{:,.4f}".format(data.scalp.tp2) }}</span>
                     </div>
                     <div class="trade-row border">
@@ -215,18 +217,18 @@ HTML_TEMPLATE = """
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px;">
                         <div style="background: #1e293b; padding: 8px; border-radius: 8px; font-size: 0.8rem;">
                             <span style="color:#94a3b8;">سقف ۶ ماهه:</span><br>
-                            <b>${{ "{:,.2f}".format(data.macro.high_6m) }}</b>
+                            <b>${{ "{:,.2f}".format(data.macro.high_6m) if data.macro.high_6m > 10 else "{:,.4f}".format(data.macro.high_6m) }}</b>
                         </div>
                         <div style="background: #1e293b; padding: 8px; border-radius: 8px; font-size: 0.8rem;">
                             <span style="color:#94a3b8;">کف ۶ ماهه:</span><br>
-                            <b>${{ "{:,.2f}".format(data.macro.low_6m) }}</b>
+                            <b>${{ "{:,.2f}".format(data.macro.low_6m) if data.macro.low_6m > 10 else "{:,.4f}".format(data.macro.low_6m) }}</b>
                         </div>
                     </div>
                 </div>
             {% endif %}
 
             <p style="text-align: center; color: #64748b; font-size: 0.72rem; margin-top: 10px;">
-                بروزرسانی خودکار هر ۳۰ ثانیه • رعایت حد ضرر و مدیریت سرمایه الزامی است
+                بروزرسانی خودکار هر ۲۵ ثانیه • رعایت حد ضرر و مدیریت ریسک در معاملات الزامی است
             </p>
         </div>
     </div>
@@ -324,7 +326,6 @@ def compute_15_indicators_and_smc(df):
 
     bos_status = "صعودی (Bullish BOS)" if c_ema9 > c_ema21 and c_price > c_ema50 else "نزولی (Bearish BOS)"
 
-    # لیست اندیکاتورها برای UI
     ind_list = [
         {"name": "RSI(14)", "val": f"{c_rsi:.1f}", "cls": "ind-bull" if c_rsi < 45 else ("ind-bear" if c_rsi > 65 else "ind-neu")},
         {"name": "MACD Hist", "val": f"{c_macd_h:.2f}", "cls": "ind-bull" if c_macd_h > 0 else "ind-bear"},
@@ -343,7 +344,7 @@ def compute_15_indicators_and_smc(df):
         {"name": "ساختار کلی", "val": bos_status.split()[0], "cls": "ind-bull" if "Bullish" in bos_status else "ind-bear"}
     ]
 
-    # امتیازدهی دقیق بر مبنای ۱۵ اندیکاتور
+    # امتیازدهی تأییدیه‌ها
     bull_count = sum([
         1 if c_ema9 > c_ema21 else 0,
         1 if c_rsi < 48 else 0,
@@ -393,7 +394,6 @@ def compute_15_indicators_and_smc(df):
         tp1 = c_price + (1.4 * c_atr)
         tp2 = c_price + (2.6 * c_atr)
         
-        # محاسبه احتمال برد پویا (بین ۵۵٪ تا ۸۴٪)
         win_rate = min(84, 52 + int((bull_count / 15.0) * 32))
         confluence_text = f"بسیار قوی ({bull_count} از ۱۵ تأییدیه)"
         risk_dist = abs(entry - sl)
@@ -408,7 +408,6 @@ def compute_15_indicators_and_smc(df):
         tp1 = c_price - (1.4 * c_atr)
         tp2 = c_price - (2.6 * c_atr)
         
-        # محاسبه احتمال برد پویا
         win_rate = min(84, 52 + int((bear_count / 15.0) * 32))
         confluence_text = f"بسیار قوی ({bear_count} از ۱۵ تأییدیه)"
         risk_dist = abs(sl - entry)
@@ -416,7 +415,7 @@ def compute_15_indicators_and_smc(df):
         rr_ratio = f"{reward_dist / (risk_dist + 1e-9):.2f}"
 
     else:
-        signal = "⚪ عدم ورود / بازار رنج (WAIT FOR SMC CONFIRMATION)"
+        signal = "⚪ عدم ورود / بازار رنج (WAIT FOR CONFIRMATION)"
         status_class = "hold"
         win_rate = 50
         confluence_text = "ضعیف / بدون جهت شفاف"
@@ -452,14 +451,27 @@ def compute_6m_macro_analysis(symbol):
         desc = "بیت‌کوین در افق ۶ ماهه در یک فاز ساختاری قدرتمند قرار دارد. حفظ میانگین متحرک ۵۰ روزه به عنوان حمایت داینامیک، تثبیت‌کننده روند صعودی کلان است."
         buy_desc = f"خرید پله‌ای مطمئن در محدوده گلدن زون بین ${fib_618:,.0f} تا ${fib_500:,.0f} (تلاقی با اردر بلاک هفتگی)."
         sell_desc = f"سیو سود مرحله اول در سقف مقاومتی ${high_6m:,.0f} و پله دوم در تارگت روانی ${high_6m * 1.15:,.0f}."
+        
     elif symbol == "ETH-USD":
         desc = "اتریوم در تایم‌فریم ۶ ماهه همبستگی بالایی با جریان نقدینگی دیفای و استیکینگ نشان می‌دهد. ناحیه میانی کانال ۶ ماهه اصلی‌ترین تکیه‌گاه خریداران نهادی است."
         buy_desc = f"محدوده انباشت سازمانی بین ${fib_618:,.0f} تا ${fib_500:,.0f}."
         sell_desc = f"تارگت اصلی خروج و سیو سود در باند ${high_6m:,.0f} تا ${high_6m * 1.12:,.0f}."
+        
     elif symbol == "GC=F":
-        desc = "انس جهانی طلا در چرخه ۶ ماهه نقش پناهگاه امن در برابر تورم و نوسانات نرخ بهره را دارد و در یک روند صعودی تثبیت‌شده حرکت می‌کند."
-        buy_desc = f"پله‌های خرید فیزیکی/معاملاتی در اصلاحات قیمتی بین ${fib_500:,.1f} تا ${fib_618:,.1f}."
+        desc = "انس جهانی طلا در چرخه ۶ ماهه نقش پناهگاه امن در برابر ریسک‌های ژئوپلیتیک و نوسانات نرخ بهره را دارد و در یک روند صعودی تثبیت‌شده حرکت می‌کند."
+        buy_desc = f"پله‌های خرید سرمایه‌گذاری در اصلاحات قیمتی بین ${fib_500:,.1f} تا ${fib_618:,.1f}."
         sell_desc = f"سیو سود در مقاومت‌های تاریخی نزدیک ${high_6m:,.1f}."
+        
+    elif symbol == "SI=F":
+        desc = "نقره جهانی علاوه بر دارایی امن، به عنوان فلز صنعتی پرکاربرد دارای بتای بالاتر نسبت به طلاست و در چرخه ۶ ماهه نوسانات سوددهی پرشتابی ارائه می‌دهد."
+        buy_desc = f"خرید در کف‌های تکنیکال و زون بازگشتی بین ${fib_618:,.2f} تا ${fib_500:,.2f}."
+        sell_desc = f"سیو سود پله اول در ${high_6m * 0.98:,.2f} و پله دوم در شکست سقف ۶ ماهه ${high_6m:,.2f}."
+
+    elif symbol == "CL=F":
+        desc = "نفت خام وست تگزاس (WTI) تحت تأثیر تصمیمات اوپک‌پلاس، تقاضای جهانی انرژی و ذخایر تجاری در یک کانال نوسانی ۶ ماهه در حال گردش است."
+        buy_desc = f"خرید پله‌ای و پوزیشن‌گیری صعودی در محدوده حمایتی قوی ${fib_618:,.2f} تا ${fib_500:,.2f}."
+        sell_desc = f"فروش و تارگت‌های سیو سود در باند مقاومتی بالایی بین ${high_6m * 0.95:,.2f} تا ${high_6m:,.2f}."
+        
     else:
         desc = "تحلیل روند ۶ ماهه بر مبنای کانال رنج و سطوح بازگشتی ۵۰٪ و ۶۱.۸٪ فیبوناچی کلان."
         buy_desc = f"محدوده حمایتی و تقاضا: ${fib_618:,.2f} تا ${fib_500:,.2f}"
