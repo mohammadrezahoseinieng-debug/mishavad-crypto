@@ -81,7 +81,7 @@ BOTTOM_DIP_GEMS = [
 ]
 
 # ----------------------------------------------------
-# ۱. دیتابیس یادگیری و کارنامه سود و زیان ماهانه
+# ۱. دیتابیس یادگیری و ذخیره ریز معاملات
 # ----------------------------------------------------
 DB_FILE = "trade_vault.db"
 
@@ -195,6 +195,31 @@ def get_learning_stats(symbol):
     else:
         return {"win_rate": win_rate, "sl_mult": 1.2, "req_score": 2, "status": "نرمال و بهینه"}
 
+def get_full_trade_history():
+    """دریافت ریز جزئیات تک‌تک معاملات ثبت شده برای کارنامه"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""SELECT id, symbol, signal_type, entry, tp, sl, result_badge, pnl_dollar, pnl_percent, timestamp 
+                 FROM trades WHERE status = 'CLOSED' ORDER BY id DESC LIMIT 30""")
+    rows = c.fetchall()
+    conn.close()
+
+    trades_list = []
+    for r in rows:
+        trades_list.append({
+            "id": r[0],
+            "symbol": r[1],
+            "type": r[2],
+            "entry": r[3],
+            "tp": r[4],
+            "sl": r[5],
+            "result": r[6],
+            "pnl_dollar": r[7],
+            "pnl_percent": r[8],
+            "time": r[9]
+        })
+    return trades_list
+
 def get_monthly_report():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -222,13 +247,12 @@ def get_monthly_report():
     return report
 
 # ----------------------------------------------------
-# ۲. دریافت چندمسیره دیتا بدون قطعی (Multi-Gateway Engine)
+# ۲. دریافت چندمسیره دیتا بدون قطعی
 # ----------------------------------------------------
 def fetch_live_data_bulletproof(symbol_key):
     asset = ASSETS[symbol_key]
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
-    # سرور اول: Binance Klines (سریع‌ترین برای کریپتو)
     if asset["type"] == "crypto" and asset["binance"]:
         try:
             url = f"https://api.binance.com/api/v3/klines?symbol={asset['binance']}&interval=5m&limit=80"
@@ -243,7 +267,6 @@ def fetch_live_data_bulletproof(symbol_key):
         except Exception:
             pass
 
-    # سرور دوم: CoinCap API
     if asset["type"] == "crypto" and asset["coincap"]:
         try:
             url = f"https://api.coincap.io/v2/assets/{asset['coincap']}/history?interval=m5"
@@ -261,7 +284,6 @@ def fetch_live_data_bulletproof(symbol_key):
         except Exception:
             pass
 
-    # سرور سوم: Yahoo Finance (طلا، نقره، نفت، فارکس و کریپتو)
     try:
         t = yf.Ticker(symbol_key)
         df = t.history(period="3d", interval="5m")
@@ -272,7 +294,6 @@ def fetch_live_data_bulletproof(symbol_key):
     except Exception:
         pass
 
-    # سرور چهارم: دریافت قیمت لحظه‌ای مستقیم و شبیه‌سازی کندل زنده
     base_price = 66500.0
     if "BTC" in symbol_key:
         try:
@@ -314,7 +335,6 @@ def fetch_live_data_bulletproof(symbol_key):
 # ----------------------------------------------------
 def fetch_live_whale_movements(symbol_key):
     asset = ASSETS[symbol_key]
-    
     if asset["type"] != "crypto":
         return {
             "whale_signal": "تحلیل جریان پول هوشمند سازمانی (Commitment of Traders)",
@@ -477,7 +497,7 @@ def process_active_trade(symbol, current_price, margin):
     }
 
 # ----------------------------------------------------
-# ۶. محاسبات اسکالپ ۵ دقیقه و اسمارت مانی
+# ۶. موتور سیگنال پیش‌دستانه (Pre-Signal Engine) و SMC
 # ----------------------------------------------------
 def compute_complete_scalp(df, margin, asset_type, symbol):
     close = df['Close']
@@ -506,6 +526,7 @@ def compute_complete_scalp(df, margin, asset_type, symbol):
     c_ema50 = float(ema50.iloc[-1])
     c_ema200 = float(ema200.iloc[-1])
 
+    # زون‌های اسمارت مانی
     demand_zone = float(low.tail(25).min())
     supply_zone = float(high.tail(25).max())
     fvg_status = "🟢 گپ صعودی باز (Bullish FVG)" if low.iloc[-1] > high.iloc[-3] else ("🔴 گپ نزولی باز (Bearish FVG)" if high.iloc[-1] < low.iloc[-3] else "خنثی / پر شده")
@@ -524,12 +545,12 @@ def compute_complete_scalp(df, margin, asset_type, symbol):
     req_score = learning['req_score']
     sl_mult = learning['sl_mult']
 
-    bull_score = sum([1 if c_ema9 > c_ema21 else 0, 1 if c_price > c_ema50 else 0, 1 if c_rsi < 62 else 0])
-    bear_score = sum([1 if c_ema9 < c_ema21 else 0, 1 if c_price < c_ema50 else 0, 1 if c_rsi > 38 else 0])
+    bull_setup = (c_ema9 > c_ema21) and (c_price > c_ema50) and (c_rsi < 65)
+    bear_setup = (c_ema9 < c_ema21) and (c_price < c_ema50) and (c_rsi > 35)
 
     active_trade = process_active_trade(symbol, c_price, margin)
 
-    signal = "⚪ بازار در حال استراحت و شناسایی (WAIT)"
+    signal = "⚪ بازار در حال استراحت و رصد ساختار (WAIT)"
     status_class = "hold"
     entry, tp, sl = None, None, None
     trade_calc = {}
@@ -543,11 +564,13 @@ def compute_complete_scalp(df, margin, asset_type, symbol):
         month_str = datetime.now().strftime("%Y-%m")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        if bull_score >= req_score:
-            signal = "🟢 سیگنال ورود لانگ (BUY / LONG)"
+        # سیگنال پیش‌دستانه قبل از تکمیل کندل شکست
+        if bull_setup:
+            signal = "🟢 ستاپ آماده‌باش ورود لانگ (BUY LIMIT / PENDING)"
             status_class = "buy"
-            entry = c_price
-            sl = c_price - (sl_mult * c_atr)
+            # ورود در اردر بلاک یا پولبک
+            entry = max(c_price * 0.9985, demand_zone)
+            sl = entry - (sl_mult * c_atr)
             risk_gap = entry - sl
             tp = entry + (2.0 * risk_gap)
             trade_calc = calculate_explicit_sizing(margin, entry, sl, tp, asset_type)
@@ -561,11 +584,11 @@ def compute_complete_scalp(df, margin, asset_type, symbol):
             conn.commit()
             conn.close()
 
-        elif bear_score >= req_score:
-            signal = "🔴 سیگنال ورود شورت (SELL / SHORT)"
+        elif bear_setup:
+            signal = "🔴 ستاپ آماده‌باش ورود شورت (SELL LIMIT / PENDING)"
             status_class = "sell"
-            entry = c_price
-            sl = c_price + (sl_mult * c_atr)
+            entry = min(c_price * 1.0015, supply_zone)
+            sl = entry + (sl_mult * c_atr)
             risk_gap = sl - entry
             tp = entry - (2.0 * risk_gap)
             trade_calc = calculate_explicit_sizing(margin, entry, sl, tp, asset_type)
@@ -672,6 +695,8 @@ HTML_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>هوش جامع معاملاتی و مالی | mishavad Ultimate</title>
     <meta http-equiv="refresh" content="25">
+    <!-- اسکریپت رسمی تریدینگ‌ویو برای لود بدون نقص چارت -->
+    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #06090e; color: #f1f5f9; padding: 12px; display: flex; justify-content: center; }
@@ -682,7 +707,7 @@ HTML_TEMPLATE = """
         .time { font-size: 0.78rem; color: #9ca3af; }
         
         .nav-tabs { display: flex; gap: 4px; margin-top: 10px; flex-wrap: wrap; }
-        .nav-tab { flex: 1; min-width: 100px; padding: 8px 4px; text-align: center; border-radius: 8px; font-size: 0.78rem; text-decoration: none; font-weight: bold; background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
+        .nav-tab { flex: 1; min-width: 95px; padding: 8px 4px; text-align: center; border-radius: 8px; font-size: 0.76rem; text-decoration: none; font-weight: bold; background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
         .nav-tab.active { background: #0284c7; color: #ffffff; border-color: #38bdf8; }
 
         .control-row { display: grid; grid-template-columns: 1.5fr 1fr; gap: 8px; margin-top: 10px; }
@@ -727,12 +752,13 @@ HTML_TEMPLATE = """
         .m-tp { background: rgba(56, 189, 248, 0.12); border-left: 4px solid #38bdf8; }
         .m-sl { background: rgba(239, 68, 68, 0.12); border-left: 4px solid #ef4444; }
 
-        table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 8px; }
-        th, td { padding: 8px; text-align: center; border-bottom: 1px solid #1e293b; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.78rem; margin-top: 8px; }
+        th, td { padding: 8px 4px; text-align: center; border-bottom: 1px solid #1e293b; }
         th { background: #1e293b; color: #94a3b8; }
         
         .forecast-canvas { width: 100%; height: 240px; background: #050811; border-radius: 12px; border: 1px solid #1e293b; margin-top: 10px; }
         .gem-card { background: #0b1120; border-radius: 12px; padding: 14px; margin-bottom: 10px; border: 1px solid #1e293b; font-size: 0.85rem; line-height: 1.6; }
+        #tv_chart_container { width: 100%; height: 350px; border-radius: 12px; overflow: hidden; margin-top: 12px; border: 1px solid #1e293b; }
     </style>
 </head>
 <body>
@@ -745,11 +771,12 @@ HTML_TEMPLATE = """
 
             <div class="nav-tabs">
                 <a href="/?tab=scalp&symbol={{ data.symbol }}&margin={{ data.margin }}" class="nav-tab {% if data.tab == 'scalp' %}active{% endif %}">⏱️ اسکالپ ۵ دقیقه</a>
+                <a href="/?tab=chart_live&symbol={{ data.symbol }}&margin={{ data.margin }}" class="nav-tab {% if data.tab == 'chart_live' %}active{% endif %}">📊 چارت لایو</a>
                 <a href="/?tab=whales&symbol={{ data.symbol }}&margin={{ data.margin }}" class="nav-tab {% if data.tab == 'whales' %}active{% endif %}">🐋 رادار نهنگ‌ها</a>
-                <a href="/?tab=macro&symbol={{ data.symbol }}&margin={{ data.margin }}" class="nav-tab {% if data.tab == 'macro' %}active{% endif %}">🏛️ تحلیل ۶ ماهه و ۱ ساله</a>
+                <a href="/?tab=macro&symbol={{ data.symbol }}&margin={{ data.margin }}" class="nav-tab {% if data.tab == 'macro' %}active{% endif %}">🏛️ تحلیل ۶ ماهه/۱ ساله</a>
                 <a href="/?tab=future_chart&symbol={{ data.symbol }}&margin={{ data.margin }}" class="nav-tab {% if data.tab == 'future_chart' %}active{% endif %}">🔮 چارت آینده</a>
                 <a href="/?tab=gems&symbol={{ data.symbol }}&margin={{ data.margin }}" class="nav-tab {% if data.tab == 'gems' %}active{% endif %}">🚀 رادار جم‌ها</a>
-                <a href="/?tab=report&symbol={{ data.symbol }}&margin={{ data.margin }}" class="nav-tab {% if data.tab == 'report' %}active{% endif %}">📊 کارنامه سود ماهانه</a>
+                <a href="/?tab=report&symbol={{ data.symbol }}&margin={{ data.margin }}" class="nav-tab {% if data.tab == 'report' %}active{% endif %}">📊 کارنامه معاملات</a>
             </div>
 
             <form id="filterForm" method="GET" action="/">
@@ -793,13 +820,13 @@ HTML_TEMPLATE = """
 
                 {% if data.scalp.entry %}
                 <div class="trade-setup">
-                    <div style="font-weight: bold; color: #cbd5e1; margin-bottom: 8px; font-size: 0.88rem;">📍 نقاط ورود و خروج با نسبت سود دو برابری استاپ ($R:R = 1:2$):</div>
+                    <div style="font-weight: bold; color: #cbd5e1; margin-bottom: 8px; font-size: 0.88rem;">📍 ستاپ پیش‌دستانه لیمیت با نسبت سود ۲ برابری استاپ ($R:R = 1:2$):</div>
                     <div class="trade-row border">
-                        <span style="color: #94a3b8;">نقطه ورود (Entry):</span>
+                        <span style="color: #94a3b8;">نقطه ورود لیمیت (Entry):</span>
                         <span class="val-entry">${{ "{:,.2f}".format(data.scalp.entry) if data.scalp.entry > 10 else "{:,.4f}".format(data.scalp.entry) }}</span>
                     </div>
                     <div class="trade-row border">
-                        <span style="color: #94a3b8;">تارگت سود قطعی (TP - آبی):</span>
+                        <span style="color: #94a3b8;">تارگت خروج قطعی (TP - آبی):</span>
                         <span class="val-tp">${{ "{:,.2f}".format(data.scalp.tp) if data.scalp.tp > 10 else "{:,.4f}".format(data.scalp.tp) }}</span>
                     </div>
                     <div class="trade-row border">
@@ -842,6 +869,28 @@ HTML_TEMPLATE = """
                     </div>
                     {% endfor %}
                 </div>
+
+            {% elif data.tab == 'chart_live' %}
+                <!-- لود رسمی چارت تریدینگ‌ویو بدون باگ -->
+                <div style="font-weight: bold; color: #38bdf8; margin-bottom: 6px;">📊 چارت زنده و تعاملی کندل‌استیک TradingView:</div>
+                <div id="tv_chart_container"></div>
+                <script type="text/javascript">
+                    new TradingView.widget({
+                        "container_id": "tv_chart_container",
+                        "autosize": true,
+                        "symbol": "{{ data.tv_symbol }}",
+                        "interval": "5",
+                        "timezone": "Etc/UTC",
+                        "theme": "dark",
+                        "style": "1",
+                        "locale": "fa_IR",
+                        "toolbar_bg": "#0d131f",
+                        "enable_publishing": false,
+                        "hide_side_toolbar": false,
+                        "allow_symbol_change": true,
+                        "save_image": false
+                    });
+                </script>
 
             {% elif data.tab == 'whales' %}
                 <div style="font-weight: bold; color: #c084fc; margin-bottom: 8px;">🐋 آخرین تراکنش‌های سنگین و والت‌های بزرگ:</div>
@@ -921,10 +970,6 @@ HTML_TEMPLATE = """
                     <path d="M 56 140 Q 150 120, 276 42" fill="none" stroke="#38bdf8" stroke-width="2.5"/>
                 </svg>
 
-                <div style="margin-top: 12px;">
-                    <iframe src="https://s.tradingview.com/widgetembed/?frameElementId=tv_scalp&symbol={{ data.tv_symbol }}&interval=5&theme=dark&style=1" width="100%" height="280" frameborder="0"></iframe>
-                </div>
-
             {% elif data.tab == 'gems' %}
                 <div style="font-weight: bold; color: #38bdf8; margin-bottom: 8px;">🌟 پروژه‌های مستعد لیستینگ در صرافی‌ها:</div>
                 {% for gem in upcoming_gems %}
@@ -956,17 +1001,11 @@ HTML_TEMPLATE = """
                 {% endfor %}
 
             {% elif data.tab == 'report' %}
-                <div style="font-weight: bold; color: #38bdf8; margin-bottom: 8px;">📈 کارنامه سود و زیان ماهانه معاملات:</div>
+                <!-- بخش خلاصه ماهانه -->
+                <div style="font-weight: bold; color: #38bdf8; margin-bottom: 6px;">📈 ۱. کارنامه خلاصه ماهانه:</div>
                 <table>
                     <thead>
-                        <tr>
-                            <th>ماه</th>
-                            <th>تعداد</th>
-                            <th>می‌شود 🎉</th>
-                            <th>نشد ❌</th>
-                            <th>وین‌ریت</th>
-                            <th>برایند دلاری</th>
-                        </tr>
+                        <tr><th>ماه</th><th>تعداد</th><th>می‌شود 🎉</th><th>نشد ❌</th><th>وین‌ریت</th><th>برایند دلاری</th></tr>
                     </thead>
                     <tbody>
                         {% for r in monthly_report %}
@@ -980,9 +1019,40 @@ HTML_TEMPLATE = """
                                 {{ "{:+,.2f}".format(r.net_pnl) }} $
                             </td>
                         </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+
+                <!-- بخش ریز جزئیات تک‌تک معاملات -->
+                <div style="font-weight: bold; color: #facc15; margin: 16px 0 6px;">📋 ۲. ریز جزئیات تک‌تک معاملات بسته شده:</div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>نماد / نوع</th>
+                            <th>نقطه ورود</th>
+                            <th>تارگت (TP)</th>
+                            <th>استاپ (SL)</th>
+                            <th>نتیجه</th>
+                            <th>سود/زیان</th>
+                            <th>زمان ثبت</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for t in full_trades %}
+                        <tr>
+                            <td><b>{{ t.symbol.split('-')[0] }}</b> <span style="color:{% if t.type=='BUY' %}#4ade80{% else %}#f87171{% endif %};">({{ t.type }})</span></td>
+                            <td style="font-family:monospace;">${{ "{:,.2f}".format(t.entry) if t.entry > 10 else "{:,.4f}".format(t.entry) }}</td>
+                            <td style="font-family:monospace; color:#38bdf8;">${{ "{:,.2f}".format(t.tp) if t.tp > 10 else "{:,.4f}".format(t.tp) }}</td>
+                            <td style="font-family:monospace; color:#facc15;">${{ "{:,.2f}".format(t.sl) if t.sl > 10 else "{:,.4f}".format(t.sl) }}</td>
+                            <td><b>{{ t.result }}</b></td>
+                            <td style="color:{% if t.pnl_dollar >= 0 %}#4ade80{% else %}#f87171{% endif %}; font-weight:bold; font-family:monospace; direction:ltr;">
+                                {{ "{:+,.2f}".format(t.pnl_dollar) }} $
+                            </td>
+                            <td style="font-size:0.7rem; color:#94a3b8;">{{ t.time.split(' ')[1] }}</td>
+                        </tr>
                         {% else %}
                         <tr>
-                            <td colspan="6" style="color:#94a3b8;">در حال پردازش داده‌ها...</td>
+                            <td colspan="7" style="color:#94a3b8;">در حال پردازش معاملات...</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -1009,7 +1079,7 @@ def index():
 
     if symbol not in ASSETS:
         symbol = 'BTC-USD'
-    if tab not in ['scalp', 'whales', 'macro', 'future_chart', 'gems', 'report']:
+    if tab not in ['scalp', 'chart_live', 'whales', 'macro', 'future_chart', 'gems', 'report']:
         tab = 'scalp'
 
     asset_info = ASSETS[symbol]
@@ -1023,6 +1093,7 @@ def index():
         whales_res = fetch_live_whale_movements(symbol)
         macro_res = compute_macro_analysis(symbol)
         monthly_report = get_monthly_report()
+        full_trades = get_full_trade_history()
 
         data = {
             "symbol": symbol,
@@ -1044,6 +1115,7 @@ def index():
             "time": datetime.now().strftime("%H:%M:%S")
         }
         monthly_report = []
+        full_trades = []
 
     return render_template_string(
         HTML_TEMPLATE,
@@ -1051,7 +1123,8 @@ def index():
         assets=ASSETS,
         upcoming_gems=UPCOMING_GEMS,
         bottom_gems=BOTTOM_DIP_GEMS,
-        monthly_report=monthly_report
+        monthly_report=monthly_report,
+        full_trades=full_trades
     )
 
 if __name__ == '__main__':
